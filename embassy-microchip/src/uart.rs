@@ -484,12 +484,13 @@ impl<'d> Uart<'d, Async> {
         Ok(uart)
     }
 
-    /// Reads bytes from RX FIFO until buffer is full.
+    /// Reads bytes from RX ring buffer.
+    /// Returns as soon as at least one byte is available.
     ///
     /// # Errors
     ///
     /// Returns [`RxError`] if error occurred during read.
-    pub fn read(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<(), RxError>> {
+    pub fn read(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<usize, RxError>> {
         self.rx.read(buf)
     }
 
@@ -630,27 +631,30 @@ impl<'d> UartRx<'d, Async> {
         Ok(Self::new_inner::<T>(rx_pin, buf))
     }
 
-    /// Reads bytes from RX FIFO until buffer is full.
+    /// Reads bytes from RX ring buffer.
+    /// Returns as soon as at least one byte is available.
     ///
     /// # Errors
     ///
     /// Returns [`RxError`] if error occurred during read.
-    pub async fn read(&mut self, buf: &mut [u8]) -> Result<(), RxError> {
+    pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize, RxError> {
         poll_fn(|cx| {
             self.info.rx_waker.register(cx.waker());
-            if self.info.buffer.available() >= buf.len() {
+            let available = self.info.buffer.available();
+            if available > 0 {
+                let to_read = core::cmp::min(available, buf.len());
                 critical_section::with(|_| {
                     let mut reader = unsafe { self.info.buffer.reader() };
                     let mut copied = 0;
-                    while copied < buf.len() {
+                    while copied < to_read {
                         copied += reader.pop(|data| {
-                            let len = core::cmp::min(data.len(), buf.len() - copied);
+                            let len = core::cmp::min(data.len(), to_read - copied);
                             buf[copied..copied + len].copy_from_slice(&data[..len]);
                             len
                         });
                     }
                 });
-                Poll::Ready(Ok(()))
+                Poll::Ready(Ok(to_read))
             } else {
                 Poll::Pending
             }
@@ -918,7 +922,7 @@ impl<'d, M: Mode> embedded_io::Read for Uart<'d, M> {
 
 impl<'d> embedded_io_async::Read for Uart<'d, Async> {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        self.read(buf).await.map(|_| buf.len())
+        self.rx.read(buf).await
     }
 }
 
@@ -986,6 +990,6 @@ impl<'d, M: Mode> embedded_io::Read for UartRx<'d, M> {
 
 impl<'d> embedded_io_async::Read for UartRx<'d, Async> {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        self.read(buf).await.map(|_| buf.len())
+        self.read(buf).await
     }
 }

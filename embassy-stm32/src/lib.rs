@@ -16,21 +16,42 @@ mod fmt;
 include!(concat!(env!("OUT_DIR"), "/_macros.rs"));
 
 // Utilities
+mod atomic;
 mod macros;
-mod reg;
 pub mod time;
 mod wait;
 /// Operating modes for peripherals.
 pub mod mode {
-    trait SealedMode {}
+    use core::marker::PhantomData;
+
+    use crate::interrupt::typelevel::{Binding, Handler, Interrupt};
+
+    /// Interrupt Handler with bindings autoimplemented for all Irq structs.
+    #[derive(Clone, Copy)]
+    pub struct NoHandler<I: Interrupt> {
+        _marker: PhantomData<I>,
+    }
+
+    impl<I: Interrupt> Handler<I> for NoHandler<I> {
+        unsafe fn on_interrupt() {}
+    }
+
+    unsafe impl<T: Copy, I: Interrupt> Binding<I, NoHandler<I>> for T {}
+
+    pub(crate) trait SealedMode {
+        #[allow(dead_code)]
+        const ASYNC: bool;
+    }
 
     /// Operating mode for a peripheral.
     #[allow(private_bounds)]
     pub trait Mode: SealedMode {}
 
     macro_rules! impl_mode {
-        ($name:ident) => {
-            impl SealedMode for $name {}
+        ($name:ident, $async: expr) => {
+            impl SealedMode for $name {
+                const ASYNC: bool = $async;
+            }
             impl Mode for $name {}
         };
     }
@@ -40,17 +61,11 @@ pub mod mode {
     /// Async mode.
     pub struct Async;
 
-    impl_mode!(Blocking);
-    impl_mode!(Async);
-}
-
-#[cfg(stm32c5)]
-macro_rules! dma_channel_impl {
-    ($channel_peri:ident, $irq:ty) => {};
+    impl_mode!(Blocking, false);
+    impl_mode!(Async, true);
 }
 
 // Always-present hardware
-#[cfg(not(stm32c5))]
 pub mod dma;
 pub mod gpio;
 pub mod rcc;
@@ -58,11 +73,16 @@ pub mod rcc;
 mod time_driver;
 pub mod timer;
 
+#[cfg(any(adf, mdf))]
+pub(crate) mod dflt;
+
 // Sometimes-present hardware
 
 #[cfg(adc)]
 pub mod adc;
-#[cfg(aes_v3b)]
+#[cfg(adf)]
+pub mod adf;
+#[cfg(any(aes_v2, aes_v3b))]
 pub mod aes;
 #[cfg(backup_sram)]
 pub mod backup_sram;
@@ -72,6 +92,8 @@ pub mod can;
 pub mod comp;
 #[cfg(all(cordic, not(stm32c5)))]
 pub mod cordic;
+#[cfg(any(aes_v2, aes_v3b, saes_n6))]
+mod crypto;
 
 #[cfg(not(any(comp_u5, comp_v1, comp_v2)))]
 pub mod comp {
@@ -98,6 +120,8 @@ macro_rules! impl_comp_inp_pin {
 macro_rules! impl_comp_inm_pin {
     ($inst:ident, $pin:ident, $ch:expr) => {};
 }
+#[cfg(cacheaxi)]
+pub mod cacheaxi;
 #[cfg(any(ipcc, hsem))]
 pub mod cpu;
 #[cfg(crc)]
@@ -124,12 +148,18 @@ pub mod dts;
 pub mod eth;
 #[cfg(feature = "exti")]
 pub mod exti;
-#[cfg(all(flash, not(stm32c5)))]
+#[cfg(flash)]
 pub mod flash;
 #[cfg(fmac)]
 pub mod fmac;
-#[cfg(fmc)]
+#[cfg(any(fmc, fsmc))]
 pub mod fmc;
+#[cfg(any(gfxmmu_v2, gfxmmu_n6))]
+pub mod gfxmmu;
+#[cfg(gfxtim)]
+pub mod gfxtim;
+#[cfg(all(gpu2d, stm32u5))]
+pub mod gpu2d;
 #[cfg(hash)]
 pub mod hash;
 #[cfg(hrtim)]
@@ -142,36 +172,52 @@ pub mod hspi;
 pub mod i2c;
 #[cfg(any(spi_v1_i2s, spi_v2_i2s, spi_v3_i2s, spi_v4_i2s, spi_v5_i2s))]
 pub mod i2s;
+#[cfg(all(i3c, any(stm32n6, stm32h5, stm32u3, stm32c5, stm32h7rs)))]
+pub mod i3c;
+#[cfg(icache)]
+pub mod icache;
 #[cfg(any(stm32wb, stm32wl5x))]
 pub mod ipcc;
-// Limited to N6 for now — on H7 the metapac entry for JPEG has `rcc: None`
-// (no RccPeripheral impl is generated), and the DMA signal names differ
-// (INFIFO/OUTFIFO vs N6's RX/TX). Broaden once stm32-data is updated.
-#[cfg(all(jpeg, stm32n6))]
+// JPEG is unavailable on some families (e.g. H7 uses different DMA signal names).
+#[cfg(all(jpeg, any(stm32n6, stm32u5f9, stm32u5g9)))]
 pub mod jpeg;
 #[cfg(lcd)]
 pub mod lcd;
 #[cfg(feature = "low-power")]
 pub mod low_power;
+#[cfg(lpgpio)]
+pub mod lpgpio;
 #[cfg(lptim)]
 pub mod lptim;
 #[cfg(ltdc)]
 pub mod ltdc;
+#[cfg(mce)]
+pub mod mce;
+#[cfg(mdf)]
+pub mod mdf;
+#[cfg(mdios)]
+pub mod mdios;
+#[cfg(npu)]
+pub mod npu;
 #[cfg(opamp)]
 pub mod opamp;
 #[cfg(octospi)]
 pub mod ospi;
-#[cfg(pka_v1a)]
+#[cfg(any(pka_v1a, pka_n6))]
 pub mod pka;
+#[cfg(pssi)]
+pub mod pssi;
 #[cfg(quadspi)]
 pub mod qspi;
+#[cfg(ramcfg_wba)]
+pub mod ramcfg;
 #[cfg(rifsc)]
 pub mod rif;
 #[cfg(rng)]
 pub mod rng;
 #[cfg(all(rtc, not(rtc_v1)))]
 pub mod rtc;
-#[cfg(saes_v1a)]
+#[cfg(any(saes_v1a, saes_n6))]
 pub mod saes;
 #[cfg(sai)]
 pub mod sai;
@@ -181,6 +227,8 @@ pub mod sdmmc;
 pub mod spdifrx;
 #[cfg(spi)]
 pub mod spi;
+#[cfg(any(tamp_g0, tamp_g4, tamp_h5, tamp_l5, tamp_u5, tamp_wba, tamp_wl, tamp_n6))]
+pub mod tamp;
 #[cfg(tsc)]
 pub mod tsc;
 #[cfg(ucpd)]
@@ -360,7 +408,6 @@ pub mod low_power {
     }
 }
 
-#[cfg(not(stm32c5))]
 use crate::interrupt::Priority;
 #[cfg(feature = "rt")]
 pub use crate::pac::NVIC_PRIO_BITS;
@@ -447,7 +494,7 @@ pub struct Config {
     /// GPDMA interrupt priority.
     ///
     /// Defaults to P0 (highest).
-    #[cfg(gpdma)]
+    #[cfg(any(gpdma, lpdma))]
     pub gpdma_interrupt_priority: Priority,
 
     /// MDMA interrupt priority.
@@ -497,7 +544,7 @@ impl Default for Config {
             bdma_interrupt_priority: Priority::P0,
             #[cfg(dma)]
             dma_interrupt_priority: Priority::P0,
-            #[cfg(gpdma)]
+            #[cfg(any(gpdma, lpdma))]
             gpdma_interrupt_priority: Priority::P0,
             #[cfg(mdma)]
             mdma_interrupt_priority: Priority::P0,
@@ -725,10 +772,7 @@ fn init_hw(config: Config) -> Peripherals {
 
         #[cfg(dbgmcu)]
         crate::pac::DBGMCU.cr().modify(|cr| {
-            #[cfg(stm32c5)]
-            let _ = cr;
-
-            #[cfg(dbgmcu_h5)]
+            #[cfg(any(dbgmcu_h5, dbgmcu_c5))]
             {
                 cr.set_stop(config.enable_debug_during_sleep);
                 cr.set_standby(config.enable_debug_during_sleep);
@@ -923,14 +967,13 @@ fn init_hw(config: Config) -> Peripherals {
             #[cfg(stm32f1)]
             crate::pac::AFIO.mapr().modify(|w| w.set_swj_cfg(config.swj.into()));
 
-            #[cfg(not(stm32c5))]
             dma::init(
                 cs,
                 #[cfg(bdma)]
                 config.bdma_interrupt_priority,
                 #[cfg(dma)]
                 config.dma_interrupt_priority,
-                #[cfg(gpdma)]
+                #[cfg(any(gpdma, lpdma))]
                 config.gpdma_interrupt_priority,
                 #[cfg(mdma)]
                 config.mdma_interrupt_priority,
@@ -951,6 +994,12 @@ fn init_hw(config: Config) -> Peripherals {
             // must be after time-driver init
             #[cfg(all(feature = "low-power", not(feature = "_lp-time-driver")))]
             rtc::init_rtc(cs, config.rtc, config.min_stop_pause);
+            #[cfg(all(feature = "low-power", feature = "_lp-time-driver"))]
+            crate::time_driver::LPTimeDriver::set_min_stop_pause(
+                crate::time_driver::get_driver(),
+                cs,
+                config.min_stop_pause,
+            );
         }
 
         p
